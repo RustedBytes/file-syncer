@@ -44,8 +44,17 @@ jobs:
       - name: Build binary
         run: cargo zigbuild --release --target ${{ matrix.target }}
 
+      - name: Install arm64 binutils
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+
       - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/file-syncer
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/file-syncer
+          else
+            strip target/${{ matrix.target }}/release/file-syncer
+          fi
 
       - name: Package binary
         run: |
