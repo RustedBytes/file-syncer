@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -63,7 +63,7 @@ jobs:
           XZ_OPT=-9 tar -cJf file-syncer-${{ matrix.name }}.tar.xz -C dist file-syncer-${{ matrix.name }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: file-syncer-${{ matrix.name }}
           path: file-syncer-${{ matrix.name }}.tar.xz
@@ -75,7 +75,7 @@ jobs:
     needs: build
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: file-syncer-*
           merge-multiple: true
