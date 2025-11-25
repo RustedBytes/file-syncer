@@ -1,0 +1,12 @@
+[package]
+name = "file-syncer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+flexi_logger = "0.31.7"
+log = "0.4"
+tempfile = "3.10"
+walkdir = "2.5"
