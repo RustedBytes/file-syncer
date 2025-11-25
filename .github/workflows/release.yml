@@ -34,22 +34,30 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/file-syncer
+          else
+            strip target/${{ matrix.target }}/release/file-syncer
+          fi
 
       - name: Package binary
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/file-syncer dist/file-syncer-${{ matrix.name }}
-          tar -czf file-syncer-${{ matrix.name }}.tar.gz -C dist file-syncer-${{ matrix.name }}
+          XZ_OPT=-9 tar -cJf file-syncer-${{ matrix.name }}.tar.xz -C dist file-syncer-${{ matrix.name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: file-syncer-${{ matrix.name }}
-          path: file-syncer-${{ matrix.name }}.tar.gz
+          path: file-syncer-${{ matrix.name }}.tar.xz
           retention-days: 7
 
   release:
@@ -67,6 +75,6 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: artifacts/*.tar.xz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

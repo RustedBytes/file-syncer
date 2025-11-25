@@ -10,3 +10,9 @@ flexi_logger = "0.31.7"
 log = "0.4"
 tempfile = "3.10"
 walkdir = "2.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
