@@ -54,7 +54,7 @@ jobs:
           XZ_OPT=-9 tar -cJf file-syncer-${{ matrix.name }}.tar.xz -C dist file-syncer-${{ matrix.name }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: file-syncer-${{ matrix.name }}
           path: file-syncer-${{ matrix.name }}.tar.xz
