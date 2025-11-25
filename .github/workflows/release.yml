@@ -41,7 +41,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools zig
+          sudo apt-get install -y musl-tools
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
             echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
             echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
