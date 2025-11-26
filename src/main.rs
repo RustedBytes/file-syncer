@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{ArgGroup, Parser};
-use file_syncer::{Config, MODE_PULL, MODE_PUSH, Mode, init_logger, run};
+use file_syncer::{Config, MODE_PULL, MODE_PUSH, Mode, init_logger, init_sentry, run};
+use sentry::ClientInitGuard;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -49,6 +51,13 @@ struct CliArgs {
     compression_max: bool,
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(usize), help = "Set number of rayon worker threads")]
     threads: Option<usize>,
+    #[arg(
+        long,
+        env = "SENTRY_DSN",
+        value_name = "DSN",
+        help = "Sentry DSN for error reporting"
+    )]
+    sentry_dsn: Option<String>,
 }
 
 impl TryFrom<CliArgs> for Config {
@@ -75,20 +84,32 @@ impl TryFrom<CliArgs> for Config {
                 || args.compression_max,
             compression_level: level,
             thread_count: args.threads,
+            sentry_dsn: args.sentry_dsn,
         })
     }
 }
 
 fn main() {
-    if let Err(err) = real_main() {
+    let mut sentry_guard: Option<ClientInitGuard> = None;
+
+    let result = (|| -> Result<()> {
+        init_logger()?;
+        let args = CliArgs::parse();
+        let config = Config::try_from(args)?;
+        sentry_guard = init_sentry(config.sentry_dsn.as_deref())?;
+        run(&config)
+    })();
+
+    if let Err(err) = &result {
+        sentry::capture_message(&format!("{err:?}"), sentry::Level::Error);
+        if let Some(guard) = sentry_guard.take() {
+            guard.close(Some(Duration::from_secs(2)));
+        }
         eprintln!("Error: {err:?}");
         process::exit(1);
     }
-}
 
-fn real_main() -> Result<()> {
-    init_logger()?;
-    let args = CliArgs::parse();
-    let config = Config::try_from(args)?;
-    run(&config)
+    if let Some(guard) = sentry_guard {
+        guard.close(None);
+    }
 }

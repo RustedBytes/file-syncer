@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow, bail};
 use log::info;
 use rayon::prelude::*;
+use sentry::{ClientInitGuard, IntoDsn};
 use walkdir::WalkDir;
 use zstd::stream::read::Decoder as ZstdDecoder;
 use zstd::stream::write::Encoder as ZstdEncoder;
@@ -44,6 +45,7 @@ pub struct Config {
     pub compress: bool,
     pub compression_level: CompressionLevel,
     pub thread_count: Option<usize>,
+    pub sentry_dsn: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +149,26 @@ pub fn init_logger() -> Result<()> {
         .start()?;
 
     Ok(())
+}
+
+pub fn init_sentry(dsn: Option<&str>) -> Result<Option<ClientInitGuard>> {
+    let from_env = std::env::var("SENTRY_DSN").ok();
+    let Some(raw_dsn) = dsn
+        .map(|value| value.to_string())
+        .or(from_env)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let parsed_dsn = raw_dsn.into_dsn().context("invalid Sentry DSN")?;
+    let guard = sentry::init(sentry::ClientOptions {
+        dsn: parsed_dsn,
+        release: sentry::release_name!(),
+        ..Default::default()
+    });
+
+    Ok(Some(guard))
 }
 
 fn push_files(config: &Config) -> Result<()> {
@@ -662,6 +684,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Read;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validate_config_accepts_valid_modes() {
@@ -674,6 +699,7 @@ mod tests {
             compress: false,
             compression_level: CompressionLevel::Default,
             thread_count: None,
+            sentry_dsn: None,
         };
 
         assert!(validate_config(&config).is_ok());
@@ -690,6 +716,7 @@ mod tests {
             compress: false,
             compression_level: CompressionLevel::Default,
             thread_count: None,
+            sentry_dsn: None,
         };
 
         assert!(validate_config(&config).is_err());
@@ -706,6 +733,7 @@ mod tests {
             compress: false,
             compression_level: CompressionLevel::Default,
             thread_count: None,
+            sentry_dsn: None,
         };
 
         assert!(validate_config(&config).is_err());
@@ -892,5 +920,36 @@ mod tests {
         assert!(body.contains("Added files:\n  + new1.txt\n  + new2.txt"));
         assert!(body.contains("Modified files:\n  ~ mod.txt"));
         assert!(body.contains("Deleted files:\n  - old.txt"));
+    }
+
+    #[test]
+    fn init_sentry_returns_none_without_dsn() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("SENTRY_DSN");
+        // Safety: env mutations are guarded by ENV_LOCK to avoid concurrent writes.
+        unsafe { std::env::remove_var("SENTRY_DSN") };
+
+        let guard = init_sentry(None).unwrap();
+        assert!(guard.is_none());
+
+        match original {
+            Ok(value) => unsafe { std::env::set_var("SENTRY_DSN", value) },
+            Err(_) => unsafe { std::env::remove_var("SENTRY_DSN") },
+        }
+    }
+
+    #[test]
+    fn init_sentry_rejects_invalid_dsn() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("SENTRY_DSN");
+        unsafe { std::env::remove_var("SENTRY_DSN") };
+
+        let result = init_sentry(Some("not-a-dsn"));
+        assert!(result.is_err());
+
+        match original {
+            Ok(value) => unsafe { std::env::set_var("SENTRY_DSN", value) },
+            Err(_) => unsafe { std::env::remove_var("SENTRY_DSN") },
+        }
     }
 }

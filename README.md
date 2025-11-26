@@ -133,6 +133,10 @@ Logs are emitted to stdout and `file-syncer.log` with size-based rotation (10MB,
 
 Logs are written to the current working directory.
 
+## Sentry
+
+Optional Sentry error reporting is available. Provide a DSN via `--sentry-dsn` or the `SENTRY_DSN` environment variable. When configured, panics and fatal errors are reported before the process exits.
+
 ## Testing
 
 Run the unit tests:

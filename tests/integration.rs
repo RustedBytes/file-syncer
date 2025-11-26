@@ -37,6 +37,7 @@ fn push_integration_pushes_files_to_remote() {
         compress: false,
         compression_level: file_syncer::CompressionLevel::Default,
         thread_count: None,
+        sentry_dsn: None,
     };
 
     run(&config).expect("run() push failed");
@@ -75,6 +76,7 @@ fn pull_integration_pulls_files_from_remote() {
         compress: false,
         compression_level: file_syncer::CompressionLevel::Default,
         thread_count: None,
+        sentry_dsn: None,
     };
 
     run(&config).expect("run() pull failed");
@@ -108,6 +110,7 @@ fn compression_round_trip_push_and_pull() {
         compress: true,
         compression_level: file_syncer::CompressionLevel::Max,
         thread_count: None,
+        sentry_dsn: None,
     };
 
     run(&push_config).expect("run() push with compression failed");
@@ -145,6 +148,7 @@ fn compression_round_trip_push_and_pull() {
         compress: true,
         compression_level: file_syncer::CompressionLevel::Max,
         thread_count: None,
+        sentry_dsn: None,
     };
 
     run(&pull_config).expect("run() pull with compression failed");
