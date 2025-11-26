@@ -25,7 +25,7 @@ struct CliArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Compress files with gzip during sync"
+        help = "Compress files with zstd during sync"
     )]
     compress: bool,
 }

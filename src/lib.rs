@@ -5,15 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
 use log::info;
+use rayon::prelude::*;
 use walkdir::WalkDir;
+use zstd::stream::read::Decoder as ZstdDecoder;
+use zstd::stream::write::Encoder as ZstdEncoder;
 
 pub const MODE_PUSH: &str = "push";
 pub const MODE_PULL: &str = "pull";
-const GZIP_SUFFIX: &str = "-gzipped.txt";
+const ZSTD_SUFFIX: &str = "-zstd.txt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -143,7 +143,7 @@ fn push_files(config: &Config) -> Result<()> {
     }
 
     let transform = if config.compress {
-        info!("Compression enabled; syncing files with gzip");
+        info!("Compression enabled; syncing files with zstd");
         SyncTransform::Compress
     } else {
         SyncTransform::None
@@ -275,6 +275,16 @@ fn sync_files_with_transform(
     dst_dir: &Path,
     transform: SyncTransform,
 ) -> Result<()> {
+    #[derive(Clone)]
+    struct FileTask {
+        src_path: PathBuf,
+        rel_path: PathBuf,
+        permissions: fs::Permissions,
+    }
+
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+
     let mut entries = WalkDir::new(src_dir).into_iter();
     while let Some(entry) = entries.next() {
         let entry = entry?;
@@ -298,25 +308,41 @@ fn sync_files_with_transform(
 
         let metadata = entry.metadata()?;
         if entry.file_type().is_dir() {
-            let dst_path = dst_dir.join(rel_path);
-            fs::create_dir_all(&dst_path)?;
-            fs::set_permissions(&dst_path, metadata.permissions())?;
+            dirs.push((dst_dir.join(rel_path), metadata.permissions()));
         } else {
+            files.push(FileTask {
+                src_path: entry.path().to_path_buf(),
+                rel_path: rel_path.to_path_buf(),
+                permissions: metadata.permissions(),
+            });
+        }
+    }
+
+    for (dir_path, permissions) in dirs {
+        fs::create_dir_all(&dir_path)?;
+        fs::set_permissions(&dir_path, permissions)?;
+    }
+
+    files
+        .par_iter()
+        .try_for_each(|task| -> Result<()> {
             let target_rel = match transform {
-                SyncTransform::Compress => compress_relative_path(rel_path),
-                SyncTransform::Decompress => decompress_relative_path(rel_path),
-                SyncTransform::None => rel_path.to_path_buf(),
+                SyncTransform::Compress => compress_relative_path(&task.rel_path),
+                SyncTransform::Decompress => decompress_relative_path(&task.rel_path),
+                SyncTransform::None => task.rel_path.clone(),
             };
             let dst_path = dst_dir.join(target_rel);
             if matches!(transform, SyncTransform::Compress) {
-                compress_file(entry.path(), &dst_path, metadata.permissions())?;
-            } else if matches!(transform, SyncTransform::Decompress) && is_gzipped_file(rel_path) {
-                decompress_file(entry.path(), &dst_path, metadata.permissions())?;
+                compress_file(&task.src_path, &dst_path, task.permissions.clone())?;
+            } else if matches!(transform, SyncTransform::Decompress)
+                && is_zstd_file(&task.rel_path)
+            {
+                decompress_file(&task.src_path, &dst_path, task.permissions.clone())?;
             } else {
-                copy_file(entry.path(), &dst_path, metadata.permissions())?;
+                copy_file(&task.src_path, &dst_path, task.permissions.clone())?;
             }
-        }
-    }
+            Ok(())
+        })?;
 
     Ok(())
 }
@@ -324,7 +350,7 @@ fn sync_files_with_transform(
 fn compress_relative_path(rel_path: &Path) -> PathBuf {
     let mut path = rel_path.to_path_buf();
     if let Some(file_name) = rel_path.file_name().and_then(|name| name.to_str()) {
-        path.set_file_name(format!("{file_name}{GZIP_SUFFIX}"));
+        path.set_file_name(format!("{file_name}{ZSTD_SUFFIX}"));
     }
     path
 }
@@ -339,17 +365,17 @@ fn decompress_relative_path(rel_path: &Path) -> PathBuf {
 
 fn original_file_name(rel_path: &Path) -> Option<PathBuf> {
     let file_name = rel_path.file_name()?.to_str()?;
-    let stripped = file_name.strip_suffix(GZIP_SUFFIX)?;
+    let stripped = file_name.strip_suffix(ZSTD_SUFFIX)?;
     let mut path = rel_path.to_path_buf();
     path.set_file_name(stripped);
     Some(path)
 }
 
-fn is_gzipped_file(rel_path: &Path) -> bool {
+fn is_zstd_file(rel_path: &Path) -> bool {
     rel_path
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.ends_with(GZIP_SUFFIX))
+        .map(|name| name.ends_with(ZSTD_SUFFIX))
         .unwrap_or(false)
 }
 
@@ -372,7 +398,7 @@ fn compress_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result
 
     let mut src_file = File::open(src)?;
     let dst_file = File::create(dst)?;
-    let mut encoder = GzEncoder::new(dst_file, Compression::best());
+    let mut encoder = ZstdEncoder::new(dst_file, 22)?;
     io::copy(&mut src_file, &mut encoder)?;
     encoder.finish()?;
     fs::set_permissions(dst, permissions)?;
@@ -385,7 +411,7 @@ fn decompress_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Resu
     }
 
     let src_file = File::open(src)?;
-    let mut decoder = GzDecoder::new(src_file);
+    let mut decoder = ZstdDecoder::new(src_file)?;
     let mut dst_file = File::create(dst)?;
     io::copy(&mut decoder, &mut dst_file)?;
     fs::set_permissions(dst, permissions)?;
@@ -678,9 +704,9 @@ mod tests {
     #[test]
     fn compression_relative_path_transforms_file_names() {
         let compressed = compress_relative_path(Path::new("dir/file.txt"));
-        assert_eq!(compressed, PathBuf::from("dir/file.txt-gzipped.txt"));
+        assert_eq!(compressed, PathBuf::from("dir/file.txt-zstd.txt"));
 
-        let decompressed = decompress_relative_path(Path::new("dir/file.txt-gzipped.txt"));
+        let decompressed = decompress_relative_path(Path::new("dir/file.txt-zstd.txt"));
         assert_eq!(decompressed, PathBuf::from("dir/file.txt"));
 
         let untouched = decompress_relative_path(Path::new("dir/plain.txt"));
@@ -701,7 +727,7 @@ mod tests {
         )
         .unwrap();
 
-        let compressed_path = compressed_dir.path().join("notes.md-gzipped.txt");
+        let compressed_path = compressed_dir.path().join("notes.md-zstd.txt");
         assert!(compressed_path.exists());
 
         let restored_dir = tempfile::tempdir().unwrap();

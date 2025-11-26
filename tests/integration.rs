@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use file_syncer::{Config, Mode, run};
-use flate2::read::GzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 struct TempRemoteRepo {
     _base_dir: tempfile::TempDir,
@@ -118,15 +118,15 @@ fn compression_round_trip_push_and_pull() {
         ],
     );
 
-    let compressed_path = verification_dir.path().join("reports/data.log-gzipped.txt");
+    let compressed_path = verification_dir.path().join("reports/data.log-zstd.txt");
     assert!(compressed_path.exists());
 
     let mut decoded = String::new();
     let file = File::open(&compressed_path).expect("open compressed file");
-    let mut decoder = GzDecoder::new(file);
+    let mut decoder = ZstdDecoder::new(file).expect("create decoder");
     decoder
         .read_to_string(&mut decoded)
-        .expect("decode gzip contents");
+        .expect("decode zstd contents");
     assert_eq!(decoded, "compressed body");
 
     let pull_dir = tempfile::tempdir().expect("failed to create pull dir");

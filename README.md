@@ -11,7 +11,7 @@ Rust CLI that synchronizes a local folder with a git repository in either push o
 - Size-based log rotation (10MB, keep 3 files) logging to both stdout and `file-syncer.log`
 - Skips the `.git` directory during sync
 - Generates commit messages based on detected file changes
-- Optional gzip compression that stores files as `*-gzipped.txt` in the repository
+- Optional zstd compression that stores files as `*-zstd.txt` in the repository
 
 ## Installation
 
@@ -55,7 +55,7 @@ cargo install --path .
 file-syncer --mode pull --folder ./myfiles --repo https://github.com/user/repo.git --branch develop
 ```
 
-Compress files during sync (they are stored as `*-gzipped.txt` in the repository and restored to the original names when pulling):
+Compress files during sync (they are stored as `*-zstd.txt` in the repository and restored to the original names when pulling):
 
 ```bash
 file-syncer --mode push --folder ./data --repo https://github.com/user/repo.git --compress

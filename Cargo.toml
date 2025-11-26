@@ -10,7 +10,8 @@ flexi_logger = "0.31"
 log = "0.4"
 tempfile = "3"
 walkdir = "2"
-flate2 = "1"
+zstd = "0.13"
+rayon = "1"
 
 [profile.release]
 opt-level = "z"
