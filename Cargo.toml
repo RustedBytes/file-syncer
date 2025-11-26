@@ -13,6 +13,7 @@ walkdir = "2"
 zstd = "0.13"
 rayon = "1"
 sentry = "0.46"
+openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
 opt-level = "z"
