@@ -372,7 +372,7 @@ fn compress_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result
 
     let mut src_file = File::open(src)?;
     let dst_file = File::create(dst)?;
-    let mut encoder = GzEncoder::new(dst_file, Compression::default());
+    let mut encoder = GzEncoder::new(dst_file, Compression::best());
     io::copy(&mut src_file, &mut encoder)?;
     encoder.finish()?;
     fs::set_permissions(dst, permissions)?;
