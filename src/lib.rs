@@ -5,11 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use log::info;
 use walkdir::WalkDir;
 
 pub const MODE_PUSH: &str = "push";
 pub const MODE_PULL: &str = "pull";
+const GZIP_SUFFIX: &str = "-gzipped.txt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -36,6 +40,7 @@ pub struct Config {
     pub repo_url: String,
     pub branch: String,
     pub ssh_key_path: Option<String>,
+    pub compress: bool,
 }
 
 pub fn validate_config(config: &Config) -> Result<()> {
@@ -58,14 +63,15 @@ pub fn run(config: &Config) -> Result<()> {
     validate_config(config)?;
 
     info!(
-        "File Syncer started: mode={}, folder={}, repository={}, branch={}",
+        "File Syncer started: mode={}, folder={}, repository={}, branch={}, compress={}",
         match config.mode {
             Mode::Push => MODE_PUSH,
             Mode::Pull => MODE_PULL,
         },
         config.folder_path.display(),
         config.repo_url,
-        config.branch
+        config.branch,
+        config.compress
     );
 
     match config.mode {
@@ -136,12 +142,19 @@ fn push_files(config: &Config) -> Result<()> {
         .context("failed to create branch")?;
     }
 
+    let transform = if config.compress {
+        info!("Compression enabled; syncing files with gzip");
+        SyncTransform::Compress
+    } else {
+        SyncTransform::None
+    };
+
     info!(
         "Syncing files from {} to {}",
         abs_path.display(),
         temp_path.display()
     );
-    sync_files(&abs_path, temp_path).context("failed to sync files")?;
+    sync_files_with_transform(&abs_path, temp_path, transform).context("failed to sync files")?;
 
     let status_output = run_command_output(
         temp_path,
@@ -228,18 +241,40 @@ fn pull_files(config: &Config) -> Result<()> {
     )
     .context("failed to clone repository")?;
 
+    let transform = if config.compress {
+        info!("Compression enabled; decompressing files after pull");
+        SyncTransform::Decompress
+    } else {
+        SyncTransform::None
+    };
+
     info!(
         "Syncing files from {} to {}",
         temp_path.display(),
         abs_path.display()
     );
-    sync_files(temp_path, &abs_path).context("failed to sync files")?;
+    sync_files_with_transform(temp_path, &abs_path, transform).context("failed to sync files")?;
 
     info!("Pull completed successfully");
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncTransform {
+    None,
+    Compress,
+    Decompress,
+}
+
 pub fn sync_files(src_dir: &Path, dst_dir: &Path) -> Result<()> {
+    sync_files_with_transform(src_dir, dst_dir, SyncTransform::None)
+}
+
+fn sync_files_with_transform(
+    src_dir: &Path,
+    dst_dir: &Path,
+    transform: SyncTransform,
+) -> Result<()> {
     let mut entries = WalkDir::new(src_dir).into_iter();
     while let Some(entry) = entries.next() {
         let entry = entry?;
@@ -252,26 +287,70 @@ pub fn sync_files(src_dir: &Path, dst_dir: &Path) -> Result<()> {
             continue;
         }
 
-        if let Some(first_component) = rel_path.components().next() {
-            if first_component.as_os_str() == OsStr::new(".git") {
-                if entry.file_type().is_dir() {
-                    entries.skip_current_dir();
-                }
-                continue;
+        if let Some(first_component) = rel_path.components().next()
+            && first_component.as_os_str() == OsStr::new(".git")
+        {
+            if entry.file_type().is_dir() {
+                entries.skip_current_dir();
             }
+            continue;
         }
 
-        let dst_path = dst_dir.join(rel_path);
         let metadata = entry.metadata()?;
         if entry.file_type().is_dir() {
+            let dst_path = dst_dir.join(rel_path);
             fs::create_dir_all(&dst_path)?;
             fs::set_permissions(&dst_path, metadata.permissions())?;
         } else {
-            copy_file(entry.path(), &dst_path, metadata.permissions())?;
+            let target_rel = match transform {
+                SyncTransform::Compress => compress_relative_path(rel_path),
+                SyncTransform::Decompress => decompress_relative_path(rel_path),
+                SyncTransform::None => rel_path.to_path_buf(),
+            };
+            let dst_path = dst_dir.join(target_rel);
+            if matches!(transform, SyncTransform::Compress) {
+                compress_file(entry.path(), &dst_path, metadata.permissions())?;
+            } else if matches!(transform, SyncTransform::Decompress) && is_gzipped_file(rel_path) {
+                decompress_file(entry.path(), &dst_path, metadata.permissions())?;
+            } else {
+                copy_file(entry.path(), &dst_path, metadata.permissions())?;
+            }
         }
     }
 
     Ok(())
+}
+
+fn compress_relative_path(rel_path: &Path) -> PathBuf {
+    let mut path = rel_path.to_path_buf();
+    if let Some(file_name) = rel_path.file_name().and_then(|name| name.to_str()) {
+        path.set_file_name(format!("{file_name}{GZIP_SUFFIX}"));
+    }
+    path
+}
+
+fn decompress_relative_path(rel_path: &Path) -> PathBuf {
+    if let Some(original) = original_file_name(rel_path) {
+        original
+    } else {
+        rel_path.to_path_buf()
+    }
+}
+
+fn original_file_name(rel_path: &Path) -> Option<PathBuf> {
+    let file_name = rel_path.file_name()?.to_str()?;
+    let stripped = file_name.strip_suffix(GZIP_SUFFIX)?;
+    let mut path = rel_path.to_path_buf();
+    path.set_file_name(stripped);
+    Some(path)
+}
+
+fn is_gzipped_file(rel_path: &Path) -> bool {
+    rel_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(GZIP_SUFFIX))
+        .unwrap_or(false)
 }
 
 fn copy_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result<()> {
@@ -282,6 +361,33 @@ fn copy_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result<()>
     let mut src_file = File::open(src)?;
     let mut dst_file = File::create(dst)?;
     io::copy(&mut src_file, &mut dst_file)?;
+    fs::set_permissions(dst, permissions)?;
+    Ok(())
+}
+
+fn compress_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut src_file = File::open(src)?;
+    let dst_file = File::create(dst)?;
+    let mut encoder = GzEncoder::new(dst_file, Compression::default());
+    io::copy(&mut src_file, &mut encoder)?;
+    encoder.finish()?;
+    fs::set_permissions(dst, permissions)?;
+    Ok(())
+}
+
+fn decompress_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let src_file = File::open(src)?;
+    let mut decoder = GzDecoder::new(src_file);
+    let mut dst_file = File::create(dst)?;
+    io::copy(&mut decoder, &mut dst_file)?;
     fs::set_permissions(dst, permissions)?;
     Ok(())
 }
@@ -480,6 +586,7 @@ mod tests {
             repo_url: "https://github.com/user/repo.git".to_string(),
             branch: "main".to_string(),
             ssh_key_path: None,
+            compress: false,
         };
 
         assert!(validate_config(&config).is_ok());
@@ -493,6 +600,7 @@ mod tests {
             repo_url: "https://github.com/user/repo.git".to_string(),
             branch: "main".to_string(),
             ssh_key_path: None,
+            compress: false,
         };
 
         assert!(validate_config(&config).is_err());
@@ -506,6 +614,7 @@ mod tests {
             repo_url: "".to_string(),
             branch: "main".to_string(),
             ssh_key_path: None,
+            compress: false,
         };
 
         assert!(validate_config(&config).is_err());
@@ -564,6 +673,47 @@ mod tests {
         let mut buf = String::new();
         File::open(&dst).unwrap().read_to_string(&mut buf).unwrap();
         assert_eq!(buf, content);
+    }
+
+    #[test]
+    fn compression_relative_path_transforms_file_names() {
+        let compressed = compress_relative_path(Path::new("dir/file.txt"));
+        assert_eq!(compressed, PathBuf::from("dir/file.txt-gzipped.txt"));
+
+        let decompressed = decompress_relative_path(Path::new("dir/file.txt-gzipped.txt"));
+        assert_eq!(decompressed, PathBuf::from("dir/file.txt"));
+
+        let untouched = decompress_relative_path(Path::new("dir/plain.txt"));
+        assert_eq!(untouched, PathBuf::from("dir/plain.txt"));
+    }
+
+    #[test]
+    fn sync_files_can_compress_and_decompress() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let original_file = source_dir.path().join("notes.md");
+        fs::write(&original_file, "compressed content").unwrap();
+
+        let compressed_dir = tempfile::tempdir().unwrap();
+        sync_files_with_transform(
+            source_dir.path(),
+            compressed_dir.path(),
+            SyncTransform::Compress,
+        )
+        .unwrap();
+
+        let compressed_path = compressed_dir.path().join("notes.md-gzipped.txt");
+        assert!(compressed_path.exists());
+
+        let restored_dir = tempfile::tempdir().unwrap();
+        sync_files_with_transform(
+            compressed_dir.path(),
+            restored_dir.path(),
+            SyncTransform::Decompress,
+        )
+        .unwrap();
+
+        let restored_content = fs::read_to_string(restored_dir.path().join("notes.md")).unwrap();
+        assert_eq!(restored_content, "compressed content");
     }
 
     #[test]

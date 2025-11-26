@@ -1,8 +1,11 @@
 use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use file_syncer::{Config, Mode, run};
+use flate2::read::GzDecoder;
 
 struct TempRemoteRepo {
     _base_dir: tempfile::TempDir,
@@ -31,6 +34,7 @@ fn push_integration_pushes_files_to_remote() {
         repo_url: remote.path().to_string_lossy().to_string(),
         branch: "main".to_string(),
         ssh_key_path: None,
+        compress: false,
     };
 
     run(&config).expect("run() push failed");
@@ -66,6 +70,7 @@ fn pull_integration_pulls_files_from_remote() {
         repo_url: remote.path().to_string_lossy().to_string(),
         branch: "main".to_string(),
         ssh_key_path: None,
+        compress: false,
     };
 
     run(&config).expect("run() pull failed");
@@ -78,6 +83,67 @@ fn pull_integration_pulls_files_from_remote() {
         !destination_dir.path().join(".git").exists(),
         ".git directory should not be present in destination"
     );
+}
+
+#[test]
+fn compression_round_trip_push_and_pull() {
+    require_git();
+    set_git_identity_env();
+
+    let remote = create_remote_repo_with_content([("seed.txt", "initial content")]);
+
+    let source_dir = tempfile::tempdir().expect("failed to create source dir");
+    write_test_file(source_dir.path(), "reports/data.log", "compressed body");
+
+    let push_config = Config {
+        mode: Mode::Push,
+        folder_path: source_dir.path().to_path_buf(),
+        repo_url: remote.path().to_string_lossy().to_string(),
+        branch: "main".to_string(),
+        ssh_key_path: None,
+        compress: true,
+    };
+
+    run(&push_config).expect("run() push with compression failed");
+
+    let verification_dir = tempfile::tempdir().expect("failed to create verification dir");
+    run_git(
+        verification_dir.path(),
+        [
+            "clone",
+            "--branch",
+            "main",
+            remote.path().to_str().unwrap(),
+            ".",
+        ],
+    );
+
+    let compressed_path = verification_dir.path().join("reports/data.log-gzipped.txt");
+    assert!(compressed_path.exists());
+
+    let mut decoded = String::new();
+    let file = File::open(&compressed_path).expect("open compressed file");
+    let mut decoder = GzDecoder::new(file);
+    decoder
+        .read_to_string(&mut decoded)
+        .expect("decode gzip contents");
+    assert_eq!(decoded, "compressed body");
+
+    let pull_dir = tempfile::tempdir().expect("failed to create pull dir");
+    let pull_config = Config {
+        mode: Mode::Pull,
+        folder_path: pull_dir.path().to_path_buf(),
+        repo_url: remote.path().to_string_lossy().to_string(),
+        branch: "main".to_string(),
+        ssh_key_path: None,
+        compress: true,
+    };
+
+    run(&pull_config).expect("run() pull with compression failed");
+
+    let pulled =
+        fs::read_to_string(pull_dir.path().join("reports/data.log")).expect("read pulled file");
+    assert_eq!(pulled, "compressed body");
 }
 
 fn create_remote_repo_with_content<const N: usize>(files: [(&str, &str); N]) -> TempRemoteRepo {
@@ -113,7 +179,10 @@ fn create_remote_repo_with_content<const N: usize>(files: [(&str, &str); N]) -> 
         ["symbolic-ref", "HEAD", "refs/heads/main"],
     );
 
-    TempRemoteRepo { _base_dir: base_dir, path: remote_path }
+    TempRemoteRepo {
+        _base_dir: base_dir,
+        path: remote_path,
+    }
 }
 
 fn run_git<P, I, S>(dir: P, args: I)

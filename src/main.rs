@@ -22,6 +22,12 @@ struct CliArgs {
     branch: String,
     #[arg(long, value_name = "PATH", help = "SSH private key for git operations")]
     ssh_key: Option<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compress files with gzip during sync"
+    )]
+    compress: bool,
 }
 
 impl TryFrom<CliArgs> for Config {
@@ -34,6 +40,7 @@ impl TryFrom<CliArgs> for Config {
             repo_url: args.repo,
             branch: args.branch,
             ssh_key_path: args.ssh_key,
+            compress: args.compress,
         })
     }
 }
