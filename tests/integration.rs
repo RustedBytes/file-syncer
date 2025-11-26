@@ -35,6 +35,8 @@ fn push_integration_pushes_files_to_remote() {
         branch: "main".to_string(),
         ssh_key_path: None,
         compress: false,
+        compression_level: file_syncer::CompressionLevel::Default,
+        thread_count: None,
     };
 
     run(&config).expect("run() push failed");
@@ -71,6 +73,8 @@ fn pull_integration_pulls_files_from_remote() {
         branch: "main".to_string(),
         ssh_key_path: None,
         compress: false,
+        compression_level: file_syncer::CompressionLevel::Default,
+        thread_count: None,
     };
 
     run(&config).expect("run() pull failed");
@@ -102,6 +106,8 @@ fn compression_round_trip_push_and_pull() {
         branch: "main".to_string(),
         ssh_key_path: None,
         compress: true,
+        compression_level: file_syncer::CompressionLevel::Max,
+        thread_count: None,
     };
 
     run(&push_config).expect("run() push with compression failed");
@@ -118,7 +124,7 @@ fn compression_round_trip_push_and_pull() {
         ],
     );
 
-    let compressed_path = verification_dir.path().join("reports/data.log-zstd.txt");
+    let compressed_path = verification_dir.path().join("reports/data.log-zstd");
     assert!(compressed_path.exists());
 
     let mut decoded = String::new();
@@ -137,6 +143,8 @@ fn compression_round_trip_push_and_pull() {
         branch: "main".to_string(),
         ssh_key_path: None,
         compress: true,
+        compression_level: file_syncer::CompressionLevel::Max,
+        thread_count: None,
     };
 
     run(&pull_config).expect("run() pull with compression failed");

@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use log::info;
@@ -13,7 +14,7 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 
 pub const MODE_PUSH: &str = "push";
 pub const MODE_PULL: &str = "pull";
-const ZSTD_SUFFIX: &str = "-zstd.txt";
+const ZSTD_SUFFIX: &str = "-zstd";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -41,6 +42,52 @@ pub struct Config {
     pub branch: String,
     pub ssh_key_path: Option<String>,
     pub compress: bool,
+    pub compression_level: CompressionLevel,
+    pub thread_count: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionLevel {
+    Fast,
+    #[default]
+    Default,
+    Max,
+}
+
+impl CompressionLevel {
+    fn zstd_level(self) -> i32 {
+        match self {
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Default => 3,
+            CompressionLevel::Max => 22,
+        }
+    }
+}
+
+static RAYON_THREADS: OnceLock<Option<usize>> = OnceLock::new();
+
+fn configure_rayon_threads(thread_count: Option<usize>) -> Result<()> {
+    let Some(threads) = thread_count else {
+        return Ok(());
+    };
+
+    if threads == 0 {
+        bail!("thread count must be greater than zero");
+    }
+
+    if let Some(existing) = RAYON_THREADS.get() {
+        if *existing == Some(threads) {
+            return Ok(());
+        }
+        bail!("rayon thread pool already configured");
+    }
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .context("failed to configure rayon thread pool")?;
+    let _ = RAYON_THREADS.set(Some(threads));
+    Ok(())
 }
 
 pub fn validate_config(config: &Config) -> Result<()> {
@@ -61,9 +108,10 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
 pub fn run(config: &Config) -> Result<()> {
     validate_config(config)?;
+    configure_rayon_threads(config.thread_count)?;
 
     info!(
-        "File Syncer started: mode={}, folder={}, repository={}, branch={}, compress={}",
+        "File Syncer started: mode={}, folder={}, repository={}, branch={}, compress={}, compression_level={:?}, threads={}",
         match config.mode {
             Mode::Push => MODE_PUSH,
             Mode::Pull => MODE_PULL,
@@ -71,7 +119,12 @@ pub fn run(config: &Config) -> Result<()> {
         config.folder_path.display(),
         config.repo_url,
         config.branch,
-        config.compress
+        config.compress,
+        config.compression_level,
+        config
+            .thread_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "auto".to_string())
     );
 
     match config.mode {
@@ -143,8 +196,11 @@ fn push_files(config: &Config) -> Result<()> {
     }
 
     let transform = if config.compress {
-        info!("Compression enabled; syncing files with zstd");
-        SyncTransform::Compress
+        info!(
+            "Compression enabled; syncing files with zstd ({:?})",
+            config.compression_level
+        );
+        SyncTransform::Compress(config.compression_level)
     } else {
         SyncTransform::None
     };
@@ -262,7 +318,7 @@ fn pull_files(config: &Config) -> Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SyncTransform {
     None,
-    Compress,
+    Compress(CompressionLevel),
     Decompress,
 }
 
@@ -323,26 +379,24 @@ fn sync_files_with_transform(
         fs::set_permissions(&dir_path, permissions)?;
     }
 
-    files
-        .par_iter()
-        .try_for_each(|task| -> Result<()> {
-            let target_rel = match transform {
-                SyncTransform::Compress => compress_relative_path(&task.rel_path),
-                SyncTransform::Decompress => decompress_relative_path(&task.rel_path),
-                SyncTransform::None => task.rel_path.clone(),
-            };
-            let dst_path = dst_dir.join(target_rel);
-            if matches!(transform, SyncTransform::Compress) {
-                compress_file(&task.src_path, &dst_path, task.permissions.clone())?;
-            } else if matches!(transform, SyncTransform::Decompress)
-                && is_zstd_file(&task.rel_path)
-            {
-                decompress_file(&task.src_path, &dst_path, task.permissions.clone())?;
-            } else {
-                copy_file(&task.src_path, &dst_path, task.permissions.clone())?;
+    files.par_iter().try_for_each(|task| -> Result<()> {
+        let target_rel = match transform {
+            SyncTransform::Compress(_) => compress_relative_path(&task.rel_path),
+            SyncTransform::Decompress => decompress_relative_path(&task.rel_path),
+            SyncTransform::None => task.rel_path.clone(),
+        };
+        let dst_path = dst_dir.join(target_rel);
+        match transform {
+            SyncTransform::Compress(level) => {
+                compress_file(&task.src_path, &dst_path, task.permissions.clone(), level)?
             }
-            Ok(())
-        })?;
+            SyncTransform::Decompress if is_zstd_file(&task.rel_path) => {
+                decompress_file(&task.src_path, &dst_path, task.permissions.clone())?
+            }
+            _ => copy_file(&task.src_path, &dst_path, task.permissions.clone())?,
+        }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -391,14 +445,19 @@ fn copy_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result<()>
     Ok(())
 }
 
-fn compress_file(src: &Path, dst: &Path, permissions: fs::Permissions) -> Result<()> {
+fn compress_file(
+    src: &Path,
+    dst: &Path,
+    permissions: fs::Permissions,
+    level: CompressionLevel,
+) -> Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let mut src_file = File::open(src)?;
     let dst_file = File::create(dst)?;
-    let mut encoder = ZstdEncoder::new(dst_file, 22)?;
+    let mut encoder = ZstdEncoder::new(dst_file, level.zstd_level())?;
     io::copy(&mut src_file, &mut encoder)?;
     encoder.finish()?;
     fs::set_permissions(dst, permissions)?;
@@ -613,6 +672,8 @@ mod tests {
             branch: "main".to_string(),
             ssh_key_path: None,
             compress: false,
+            compression_level: CompressionLevel::Default,
+            thread_count: None,
         };
 
         assert!(validate_config(&config).is_ok());
@@ -627,6 +688,8 @@ mod tests {
             branch: "main".to_string(),
             ssh_key_path: None,
             compress: false,
+            compression_level: CompressionLevel::Default,
+            thread_count: None,
         };
 
         assert!(validate_config(&config).is_err());
@@ -641,6 +704,8 @@ mod tests {
             branch: "main".to_string(),
             ssh_key_path: None,
             compress: false,
+            compression_level: CompressionLevel::Default,
+            thread_count: None,
         };
 
         assert!(validate_config(&config).is_err());
@@ -704,9 +769,9 @@ mod tests {
     #[test]
     fn compression_relative_path_transforms_file_names() {
         let compressed = compress_relative_path(Path::new("dir/file.txt"));
-        assert_eq!(compressed, PathBuf::from("dir/file.txt-zstd.txt"));
+        assert_eq!(compressed, PathBuf::from("dir/file.txt-zstd"));
 
-        let decompressed = decompress_relative_path(Path::new("dir/file.txt-zstd.txt"));
+        let decompressed = decompress_relative_path(Path::new("dir/file.txt-zstd"));
         assert_eq!(decompressed, PathBuf::from("dir/file.txt"));
 
         let untouched = decompress_relative_path(Path::new("dir/plain.txt"));
@@ -723,11 +788,11 @@ mod tests {
         sync_files_with_transform(
             source_dir.path(),
             compressed_dir.path(),
-            SyncTransform::Compress,
+            SyncTransform::Compress(CompressionLevel::Default),
         )
         .unwrap();
 
-        let compressed_path = compressed_dir.path().join("notes.md-zstd.txt");
+        let compressed_path = compressed_dir.path().join("notes.md-zstd");
         assert!(compressed_path.exists());
 
         let restored_dir = tempfile::tempdir().unwrap();
