@@ -615,11 +615,31 @@ pub fn escape_shell_arg(input: &str) -> String {
     result
 }
 
-pub fn build_git_ssh_command(ssh_key_path: &str) -> String {
-    format!(
-        "ssh -i {} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
-        escape_shell_arg(ssh_key_path)
-    )
+pub fn build_git_ssh_command(ssh_key_path: Option<&str>) -> String {
+    let mut parts = vec![
+        "ssh".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        "CheckHostIP=no".to_string(),
+    ];
+
+    if let Some(path) = ssh_key_path {
+        parts.push("-i".to_string());
+        parts.push(escape_shell_arg(path));
+        parts.push("-o".to_string());
+        parts.push("IdentitiesOnly=yes".to_string());
+    }
+
+    parts.join(" ")
+}
+
+fn configure_git_ssh_command(command: &mut Command, ssh_key_path: Option<&str>) {
+    if let Some(key_path) = ssh_key_path {
+        command.env("GIT_SSH_COMMAND", build_git_ssh_command(Some(key_path)));
+    } else if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        command.env("GIT_SSH_COMMAND", build_git_ssh_command(None));
+    }
 }
 
 fn run_command<I, S>(dir: &Path, ssh_key_path: Option<&str>, program: &str, args: I) -> Result<()>
@@ -634,9 +654,7 @@ where
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    if let Some(key_path) = ssh_key_path {
-        command.env("GIT_SSH_COMMAND", build_git_ssh_command(key_path));
-    }
+    configure_git_ssh_command(&mut command, ssh_key_path);
 
     let status = command
         .status()
@@ -660,9 +678,7 @@ where
 {
     let mut command = Command::new(program);
     command.args(args).current_dir(dir);
-    if let Some(key_path) = ssh_key_path {
-        command.env("GIT_SSH_COMMAND", build_git_ssh_command(key_path));
-    }
+    configure_git_ssh_command(&mut command, ssh_key_path);
 
     let output = command
         .output()
@@ -861,21 +877,29 @@ mod tests {
         let cases = vec![
             (
                 "/home/user/.ssh/id_rsa",
-                "ssh -i /home/user/.ssh/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+                "ssh -o StrictHostKeyChecking=accept-new -o CheckHostIP=no -i /home/user/.ssh/id_rsa -o IdentitiesOnly=yes",
             ),
             (
                 "/home/user/my files/.ssh/id_rsa",
-                "ssh -i /home/user/my\\ files/.ssh/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+                "ssh -o StrictHostKeyChecking=accept-new -o CheckHostIP=no -i /home/user/my\\ files/.ssh/id_rsa -o IdentitiesOnly=yes",
             ),
             (
                 "/home/user's key/.ssh/deploy (prod).pem",
-                "ssh -i /home/user\\'s\\ key/.ssh/deploy\\ \\(prod\\).pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+                "ssh -o StrictHostKeyChecking=accept-new -o CheckHostIP=no -i /home/user\\'s\\ key/.ssh/deploy\\ \\(prod\\).pem -o IdentitiesOnly=yes",
             ),
         ];
 
         for (input, expected) in cases {
-            assert_eq!(build_git_ssh_command(input), expected);
+            assert_eq!(build_git_ssh_command(Some(input)), expected);
         }
+    }
+
+    #[test]
+    fn build_git_ssh_command_without_key_sets_hostkey_options() {
+        assert_eq!(
+            build_git_ssh_command(None),
+            "ssh -o StrictHostKeyChecking=accept-new -o CheckHostIP=no"
+        );
     }
 
     #[test]

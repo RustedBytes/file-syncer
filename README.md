@@ -8,6 +8,7 @@ Rust CLI that synchronizes a local folder with a git repository in either push o
 - Pull mode: sync repository files to a local folder
 - Private repository support via your existing git/SSH configuration
 - Optional custom SSH key via `GIT_SSH_COMMAND` construction
+- Git SSH commands run non-interactively (`StrictHostKeyChecking=accept-new`, `CheckHostIP=no`) to skip host key prompts
 - Size-based log rotation (10MB, keep 3 files) logging to both stdout and `file-syncer.log`
 - Skips the `.git` directory during sync
 - Generates commit messages based on detected file changes
